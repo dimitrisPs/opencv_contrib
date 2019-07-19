@@ -11,7 +11,7 @@
 namespace cv {
 namespace stereo {
 
-#define NO_MATCH cv::Point(0,0)
+#define NO_MATCH cv::Point(-1,-1)
 
 typedef std::priority_queue<Match, std::vector<Match>, std::less<Match> > t_matchPriorityQueue;
 
@@ -142,8 +142,8 @@ public:
                             const std::vector< cv::Point2f > &featuresRight)
     {
         dMatchesLen = 0;
-        refMap = cv::Mat_<cv::Point2i>(cv::Size(width, height), cv::Point2i(0, 0));
-        mtcMap = cv::Point2i(0, 0);
+        refMap = cv::Mat_<cv::Point2i>(cv::Size(width, height), cv::Point2i(-1, -1));
+        mtcMap = cv::Point2i(-1, -1);
 
         // build texture homogeneity reference maps.
         buildTextureDescriptor(grayLeft, textureDescLeft);
@@ -254,6 +254,7 @@ public:
     void computeDisparity(const cv::Mat_<cv::Point2i> &matchMap,
                             cv::Mat_<float> &dispMat)
     {
+        mask = cv::Mat(disparityImg.size(), disparityImg.type(), Scalar(255));
         for(int row=0; row< height; row++)
         {
             for(int col=0; col<width; col++)
@@ -262,7 +263,9 @@ public:
 
                 if (matchMap.at<cv::Point2i>(tmpPoint) == NO_MATCH)
                 {
-                    dispMat.at<float>(tmpPoint) = 200;
+                    //set pixel mask to 0. This mask will be used to compute mean and std of dispMat
+                    //in quantizeDisparity
+                    mask.at<uchar>(row, col) = 0;
                     continue;
                 }
                 //if a match is found, compute the difference in location of the match and current
@@ -286,25 +289,46 @@ public:
      * @sa computeDisparity
      * @sa getDisparity
      */
-    cv::Mat quantiseDisparity(const cv::Mat_<float> &dispMat, const int lvls)
-   {
-       float tmpPixelVal ;
-       double min, max;
-//	   minMaxLoc(disparity, &min, &max);
-       min = 0;
-       max = lvls;
-       for(int row=0; row<height; row++)
-       {
-           for(int col=0; col<width; col++)
-           {
-               tmpPixelVal = dispMat.at<float>(row, col);
-               tmpPixelVal = (float) (255. - 255.0*(tmpPixelVal-min)/(max-min));
+     cv::Mat quantiseDisparity(const cv::Mat_<float> &dispMat, const uint8_t lvls)
+    {
+        float tmpPixelVal;
+        float min, max;
+        cv::Scalar mean, std;
 
-               disparityImg.at<uchar>(row, col) =  (uint8_t) tmpPixelVal;
-           }
-       }
-       return disparityImg;
-   }
+        //assuming normal distribution, in reality not the case, estimate min and max values based
+        //on ~95% of pixels.
+        cv::meanStdDev(dispMat, mean, std, mask);
+        min = mean[0]-2*std[0];
+        max = mean[0]+2*std[0];
+
+
+        float step_size = 255./lvls;
+
+        for(int row=0; row<height; row++)
+        {
+            for(int col=0; col<width; col++)
+            {
+                tmpPixelVal = dispMat.at<float>(row, col);
+                if (refMap.at<Point2i>(row, col) == NO_MATCH)
+ 				{
+             	   //unknown disparities will be black.
+         		   disparityImg.at<uchar>(row, col) = 0;
+         		   continue;
+ 				}
+                //quantize disparity image based on lvls
+         	    tmpPixelVal = (float) step_size * floor((255.0*(tmpPixelVal-min)/(max-min))/step_size + 0.5);
+
+                //clip values
+                if (tmpPixelVal<0)
+                    tmpPixelVal = 0;
+                if (tmpPixelVal >255)
+                    tmpPixelVal = 255;
+
+                disparityImg.at<uchar>(row, col) =  (uint8_t) tmpPixelVal;
+            }
+        }
+        return disparityImg;
+    }
 
 
     /**
@@ -541,12 +565,12 @@ public:
         Param.borderX = 15;
         Param.borderY = 15;
         // corr window size
-        Param.corrWinSizeX = 5;
-        Param.corrWinSizeY = 5;
-        Param.correlationThreshold = (float)0.5;
+        Param.corrWinSizeX = 4;
+        Param.corrWinSizeY = 4;
+        Param.correlationThreshold = (float)0.6;
         Param.textrureThreshold = 200;
 
-        Param.neighborhoodSize = 5;
+        Param.neighborhoodSize = 1;
         Param.disparityGradient = 1;
 
         Param.lkTemplateSize = 3;
@@ -654,6 +678,8 @@ public:
     // Containers to store input images.
     cv::Mat grayLeft;
     cv::Mat grayRight;
+    // Mask that is used to calculate disparity statistics only for known corespondences.
+    cv::Mat mask;
     // Containers to store the locations of each points pair.
     cv::Mat_<cv::Point2i> refMap;
     cv::Mat_<cv::Point2i> mtcMap;
